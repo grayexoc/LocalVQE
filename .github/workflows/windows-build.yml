@@ -1,1 +1,51 @@
+name: LocalVQE Windows x64
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build LocalVQE engine
+        run: |
+          $env:PSNativeCommandUseErrorActionPreference = $true
+          $file = 'ggml/CMakeLists.txt'
+          $source = Get-Content $file -Raw
+          $source.Replace('elseif(CMAKE_SYSTEM_PROCESSOR MATCHES', 'elseif(NOT WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES') | Set-Content $file
+          cmake -S ggml -B build-engine -G 'Visual Studio 17 2022' -A x64 -DLOCALVQE_BUILD_SHARED=ON -DGGML_OPENMP=OFF
+          cmake --build build-engine --config Release --target localvqe_shared
+      - name: Build OBS plugin
+        run: |
+          $env:PSNativeCommandUseErrorActionPreference = $true
+          git clone https://github.com/obsproject/obs-plugintemplate.git obs-build
+          git -C obs-build checkout 3e7d7ac3b5342cd7d9b88890b9c70b472d1520fc
+          Copy-Item obs-plugin/src/* obs-build/src/ -Force
+          $import = (Get-ChildItem build-engine -Recurse -Filter localvqe.lib | Select-Object -First 1).FullName.Replace('\', '/')
+          Add-Content obs-build/CMakeLists.txt 'target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/localvqe-filter.c)'
+          Add-Content obs-build/CMakeLists.txt 'target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ../ggml)'
+          Add-Content obs-build/CMakeLists.txt ('target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE "' + $import + '")')
+          Push-Location obs-build
+          cmake --preset windows-x64
+          cmake --build --preset windows-x64 --target plugintemplate-for-obs
+          Pop-Location
+      - name: Stage Windows plugin
+        run: |
+          $bin = New-Item -ItemType Directory -Force package/obs-plugins/64bit
+          $data = New-Item -ItemType Directory -Force package/data/obs-plugins/obs-localvqe
+          $plugin = Get-ChildItem obs-build/build_x64 -Recurse -Filter plugintemplate-for-obs.dll | Select-Object -First 1
+          Copy-Item $plugin.FullName (Join-Path $bin.FullName 'obs-localvqe.dll')
+          Get-ChildItem build-engine -Recurse -Filter localvqe.dll | Copy-Item -Destination $bin.FullName
+          Copy-Item obs-plugin/data/* $data.FullName -Recurse -Force
+          $model = 'localvqe-v1.3-4.8M-f32.gguf'
+          Invoke-WebRequest "https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/$model" -OutFile (Join-Path $data.FullName $model)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-localvqe-windows-x64
+          path: package/
+          if-no-files-found: error
 
